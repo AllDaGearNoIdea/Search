@@ -15,6 +15,10 @@ in [ROADMAP.md](ROADMAP.md).
 
 - A bookmark opens in a tab of its own, from the bookmarks bar, the Bookmarks menu or the list: opened from a pinned tab it used to take the pin's place. An empty new tab is used as it is, and ⌘ opens the bookmark behind the tab you are on.
 
+### Fixed
+
+- An app an extension talks to no longer has its reply cut off when it quits right after writing it. Search called the conversation over as soon as the app quit, and a reply still on its way was lost; it now reads to the end of what the app wrote, as Chrome does.
+
 ### Held back
 
 Not in this version, kept on main for a later one:
