@@ -87,6 +87,7 @@ in [ROADMAP.md](ROADMAP.md).
 - Download Linked File in a link's right-click menu saves the file. It did nothing: WebKit fetched the file and had nowhere to put it. Thanks [@Aaditya2605](https://github.com/Aaditya2605) ([#505](https://github.com/driceroland/Search/pull/505))
 - The folded column slides out over the page more smoothly, in full screen above all: its shadow was drawn again from every row and icon in it on each frame of the slide, down the column's whole height, and now falls from the plain ground under it, which looks the same. Thanks [@oddharsh](https://github.com/oddharsh) ([#499](https://github.com/driceroland/Search/pull/499))
 - The tab you're on can be closed with a click when the tabs are down to their icons: with the pointer on it, its icon becomes the cross, as in Chrome. The other tabs keep their icon, so a click to go to one never closes it. Before, only ⌘W, a middle-click or the menu closed a tab that narrow. Thanks [@Aaditya2605](https://github.com/Aaditya2605) ([#504](https://github.com/driceroland/Search/pull/504))
+- An extension whose background file is a link to another of its own files gets Search's Chrome APIs, as StopTheMadness's `background-143.js` does: the link is replaced by a copy of the file it points to, so the additions can go at its top. Thanks [@AllDaGearNoIdea](https://github.com/AllDaGearNoIdea) ([#481](https://github.com/driceroland/Search/pull/481))
 
 ### Held back
 
