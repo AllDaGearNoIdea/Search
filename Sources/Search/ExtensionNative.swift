@@ -84,13 +84,16 @@ enum ExtensionNative {
         // have left its host behind.
         stopOrphans()
         let pipe = HostPipe(program: program, origin: "chrome-extension://\(extensionID)/")
-        try pipe.start()
         pipe.onMessage = { message in
             DispatchQueue.main.async { port.sendMessage(message, completionHandler: nil) }
         }
         pipe.onExit = {
             DispatchQueue.main.async { if !port.isDisconnected { port.disconnect() } }
         }
+        // Listened to before it runs: a host may answer at once. One that
+        // can't run is let go as one that has exited.
+        Live.keep(pipe, for: port)
+        do { try pipe.start() } catch { pipe.stop(); throw error }
         var beating: Timer?
         port.messageHandler = { message, _ in
             guard let message else { return }
@@ -119,7 +122,6 @@ enum ExtensionNative {
             try? pipe.write(message)
         }
         port.disconnectHandler = { _ in beating?.invalidate(); pipe.stop() }
-        Live.keep(pipe, for: port)
     }
 
     /// WebKit doesn't always say when a port goes: an extension unloaded —
@@ -156,6 +158,8 @@ final class HostPipe: @unchecked Sendable {
     static let exitGrace: TimeInterval = 1.5
     /// How long a host has, once asked to stop, before it is killed, as in Chrome.
     static let killGrace: TimeInterval = 2
+    /// The most a host may send in one message, as in Chrome; a message to it is held to the same.
+    static let frameCap = 1 << 20
 
     private let process = Process()
     private let input = Pipe()
@@ -217,7 +221,7 @@ final class HostPipe: @unchecked Sendable {
             if now {
                 self.finish()
             } else {
-                DispatchQueue.global().asyncAfter(deadline: .now() + Self.exitGrace) { self.finish() }
+                DispatchQueue.global().asyncAfter(deadline: .now() + Self.exitGrace) { self.finish(); self.end() }
             }
         }
         try process.run()
@@ -233,7 +237,7 @@ final class HostPipe: @unchecked Sendable {
 
     func write(_ message: Any) throws {
         let json = try JSONSerialization.data(withJSONObject: message, options: [.fragmentsAllowed])
-        guard json.count <= 1 << 20 else { throw ExtensionNative.Refused(why: "Message too long for a native host") }
+        guard json.count <= Self.frameCap else { throw ExtensionNative.Refused(why: "Message too long for a native host") }
         var length = UInt32(json.count).littleEndian
         var frame = Data(bytes: &length, count: 4)
         frame.append(json)
@@ -282,8 +286,10 @@ final class HostPipe: @unchecked Sendable {
         guard !finished else { return lock.unlock() }
         buffer.append(chunk)
         var messages: [Any] = []
+        var overlong = false
         while buffer.count >= 4 {
             let length = Int(buffer.prefix(4).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).littleEndian })
+            if length > Self.frameCap { overlong = true; buffer = Data(); break }
             guard buffer.count >= 4 + length else { break }
             let body = buffer.subdata(in: 4..<(4 + length))
             buffer.removeSubrange(0..<(4 + length))
@@ -299,6 +305,9 @@ final class HostPipe: @unchecked Sendable {
         lock.unlock()
         handed.forEach { $0.0.resume(returning: $0.1) }
         rest.forEach { onMessage?($0) }
+        // As in Chrome, a host claiming a message past the cap is done with;
+        // what it sent before that in the same read is still heard.
+        if overlong { finish(); end() }
     }
 
     /// Stops the host as Chrome does: its input closed and SIGTERM, then

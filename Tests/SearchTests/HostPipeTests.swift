@@ -232,6 +232,43 @@ final class HostPipeTests: XCTestCase {
         XCTAssertEqual(exits.count, 1)
     }
 
+    // A host claiming a message past the cap is cut off and stopped, as in Chrome.
+    func testHostClaimingMessagePastCapIsDroppedAndStopped() async throws {
+        let (script, pidFile) = try host("""
+        read()
+        sys.stdout.buffer.write(struct.pack("<I", 0xFFFFFFFF) + b"made up")
+        sys.stdout.buffer.flush()
+        time.sleep(60)
+        """)
+        let exits = Counter()
+        let pipe = pipe(script, exits: exits)
+        try pipe.start()
+        let waiter = try await waiting(pipe)
+        try pipe.write(["hello": "made up"])
+        guard case .failure(let error) = await result(waiter, within: 5) else { return XCTFail("waiter got a reply") }
+        XCTAssertEqual(error.localizedDescription, "Native host has exited.")
+        XCTAssertTrue(settle { exits.count == 1 })
+        XCTAssertTrue(settle { !self.alive(pidFile) })
+        pipe.stop()
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(exits.count, 1)
+    }
+
+    // A message exactly at the cap is heard in full.
+    func testReplyExactlyAtCapIsDelivered() async throws {
+        let (script, _) = try host("""
+        read()
+        send({"pad": "x" * (\(HostPipe.frameCap) - len(json.dumps({"pad": ""})))})
+        """)
+        let exits = Counter()
+        let pipe = pipe(script, exits: exits)
+        try pipe.start()
+        let reply = try await result(Task { try await pipe.request(["hello": "made up"]) }).get() as? [String: Any]
+        XCTAssertEqual((reply?["pad"] as? String)?.count, HostPipe.frameCap - "{\"pad\": \"\"}".count)
+        XCTAssertTrue(settle { exits.count == 1 })
+        pipe.stop()
+    }
+
     // (g) a host that exits while a child of its own holds its output open.
     func testHostExitingWithOutputHeldOpenEndsAfterGrace() async throws {
         let childFile = folder.appendingPathComponent("\(UUID().uuidString).pid")
@@ -255,6 +292,9 @@ final class HostPipeTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(exited), HostPipe.exitGrace + 1)
         XCTAssertEqual(exits.count, 1)
         XCTAssertTrue(alive(childFile))
+        // Ended as a host whose output closed is: its input is closed too.
+        XCTAssertTrue(settle { (try? pipe.write(["after": true])) == nil })
+        XCTAssertThrowsError(try pipe.write(["after": true])) { XCTAssertEqual($0.localizedDescription, "Native host has exited.") }
         pipe.stop()
         XCTAssertEqual(exits.count, 1)
     }
