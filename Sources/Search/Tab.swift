@@ -401,11 +401,7 @@ final class Tab: ObservableObject, Identifiable {
     }
 
     func adoptIcon() {
-        guard let site = address.flatMap(Favicons.site) else {
-            icon = nil
-            return
-        }
-        icon = Favicons.shared.cached(site)
+        icon = Favicons.shared.cached(for: address)
     }
 
     /// True while the caret is in something on the page that takes typing.
@@ -774,8 +770,10 @@ final class Tab: ObservableObject, Identifiable {
                         self.held = nil
                     }
                     // By site, port included: localhost:3000 to localhost:5173
-                    // is another project, with another icon.
+                    // is another project, with another icon. Another path on
+                    // the same host may be another app, with one of its own.
                     let moved = Favicons.site(fresh) != self.address.flatMap(Favicons.site)
+                        || fresh.path() != self.address?.path()
                     self.address = fresh
                     // Within the same origin — history.pushState, a fragment —
                     // the page on screen is the one at the new address.
