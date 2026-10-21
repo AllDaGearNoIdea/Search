@@ -401,7 +401,7 @@ final class Tab: ObservableObject, Identifiable {
     }
 
     func adoptIcon() {
-        icon = Favicons.shared.cached(for: address)
+        icon = Favicons.shared.cached(for: address, shy: shy)
     }
 
     /// True while the caret is in something on the page that takes typing.
@@ -1517,6 +1517,11 @@ final class Tab: ObservableObject, Identifiable {
         onField = nil
         onCredentials = nil
         discard()
+        // The last private tab gone, in every window: what its pages wore
+        // goes with it.
+        guard shy else { return }
+        let others = Browsers.all.flatMap { $0.tabs + $0.parkedTabs }
+        if !others.contains(where: { $0.shy && $0 !== self }) { Favicons.shared.forgetShy() }
     }
 
     /// The page's sound started or stopped. Stopped, after it had played,

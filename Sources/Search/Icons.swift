@@ -50,11 +50,19 @@ final class Favicons {
     private var missing: Set<String> = []
     /// Icon addresses that came back with nothing usable this session.
     private var failed: Set<URL> = []
+    /// Icon addresses that gave no answer twice, and when each may be asked
+    /// again.
+    private var unreachable: [URL: Date] = [:]
+    /// A minute: a site that is down isn't asked by every page of it, and
+    /// one back up is asked again soon.
+    private static let backoff: TimeInterval = 60
     /// Icons with no file on disk, as far as `known` has looked.
     private var absent: Set<String> = []
 
     /// More pages than this and the ones seen longest ago are forgotten.
     private static let most = 4000
+    /// Declared icons tried for one page, best first; favicon.ico makes six.
+    private static let tried = 5
 
     private static var folder: URL { Store.folder.appendingPathComponent("icons", isDirectory: true) }
     private static var index: URL { folder.appendingPathComponent("pages.json") }
@@ -70,8 +78,32 @@ final class Favicons {
         loaded = true
         missing.removeAll()
         failed.removeAll()
+        unreachable.removeAll()
         absent.removeAll()
         if #available(macOS 15.4, *) { ExtensionShims.forgetIcons() }
+    }
+
+    /// One address forgotten from History: its page goes from the index,
+    /// and its icon from disk once no page wears it. A page is its path, so
+    /// the address's query makes no difference to which page goes.
+    func forget(_ url: URL) {
+        guard let site = Favicons.site(url) else { return }
+        load()
+        let page = Favicons.page(url)
+        guard let gone = pages[site]?[page] else { return }
+        pages[site]?[page] = nil
+        if pages[site]?.isEmpty == true { pages[site] = nil }
+        dropped.formUnion([gone.light, gone.dark].compactMap { $0 })
+        save()
+    }
+
+    /// The last private tab closed: what its pages wore goes with it, and
+    /// the icons only they wore go from memory.
+    func forgetShy() {
+        guard !shyPages.isEmpty else { return }
+        for site in shyPages.values { for page in site.values { dropped.formUnion([page.light, page.dark].compactMap { $0 }) } }
+        shyPages.removeAll()
+        save()
     }
     private static func file(_ ident: String) -> URL { folder.appendingPathComponent(ident + ".png") }
 
@@ -92,19 +124,16 @@ final class Favicons {
         return "\(host):\(port)"
     }
 
-    /// Which page of its site an address is: its path and query, without
-    /// the fragment, which never changes what a page declares.
+    /// Which page of its site an address is: its path. The query and the
+    /// fragment are left off: neither changes what a page declares, and a
+    /// query can carry a token, a reset link or a search, which the index
+    /// is no place for.
     nonisolated static func page(_ url: URL) -> String {
-        var path = url.path(percentEncoded: true)
-        if path.isEmpty { path = "/" }
-        if let query = url.query(percentEncoded: true) { path += "?" + query }
-        return path
+        let path = url.path(percentEncoded: true)
+        return path.isEmpty ? "/" : path
     }
 
-    private static func segments(_ page: String) -> [Substring] {
-        let path = page.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first ?? ""
-        return path.split(separator: "/")
-    }
+    private static func segments(_ page: String) -> [Substring] { page.split(separator: "/") }
 
     /// The name an icon is kept under: its own address, so pages that point
     /// at the same file share one copy.
@@ -120,6 +149,19 @@ final class Favicons {
         if let data = try? Data(contentsOf: Favicons.index),
            let kept = try? JSONDecoder().decode([String: [String: Page]].self, from: data) {
             pages = kept
+            // An index with queries in its keys: each folded into its path.
+            var folded = false
+            for (site, kept) in pages {
+                for (key, page) in kept {
+                    guard let mark = key.firstIndex(of: "?") else { continue }
+                    let path = String(key[..<mark]), there = pages[site]?[path]
+                    pages[site]?[key] = nil
+                    pages[site]?[path] = there.flatMap { $0.seen > page.seen ? $0 : nil } ?? page
+                    dropped.formUnion([page.light, page.dark, there?.light, there?.dark].compactMap { $0 })
+                    folded = true
+                }
+            }
+            if folded { save() }
             return
         }
         // Icons kept site by site, from before pages were: each stands for
@@ -185,32 +227,32 @@ final class Favicons {
     /// The icon an address wears, from what is already known, and nothing
     /// fetched: the one its page declared, or failing that the one the
     /// nearest page of the same site did, so a page never opened still has
-    /// its site's. In the dark, the dark variant when there is one.
-    func cached(for url: URL?) -> NSImage? {
+    /// its site's. In the dark, the dark variant when there is one. A
+    /// private tab (`shy`) also sees what its own pages wore; nothing else
+    /// does.
+    func cached(for url: URL?, shy: Bool = false) -> NSImage? {
         guard let url, let site = Favicons.site(url) else { return nil }
-        return lookup(site, page: Favicons.page(url))
+        return lookup(site, page: Favicons.page(url), shy: shy)
     }
 
     /// A site's icon, when there is no page to go by: the one its most
     /// recently seen page wore.
-    func cached(_ site: String) -> NSImage? { lookup(site.lowercased(), page: nil) }
+    func cached(_ site: String) -> NSImage? { lookup(site.lowercased(), page: nil, shy: false) }
 
-    private func lookup(_ site: String, page: String?) -> NSImage? {
+    private func lookup(_ site: String, page: String?, shy: Bool) -> NSImage? {
         load()
-        let key = "\(Favicons.dark) \(site) \(page ?? "")"
+        let key = "\(Favicons.dark) \(shy) \(site) \(page ?? "")"
         if let known = lookups[key] { return known }
         let other = site.hasPrefix("www.") ? String(site.dropFirst(4)) : "www." + site
-        let found = nearest(site, page: page) ?? nearest(other, page: page)
+        let found = nearest(site, page: page, shy: shy) ?? nearest(other, page: page, shy: shy)
         lookups[key] = found
         return found
     }
 
-    private func nearest(_ site: String, page: String?) -> NSImage? {
+    private func nearest(_ site: String, page: String?, shy: Bool) -> NSImage? {
         let dark = Favicons.dark
-        if let page, let exact = shyPages[site]?[page] ?? pages[site]?[page], let hit = image(exact, dark: dark) {
-            return hit
-        }
-        let kept = (pages[site] ?? [:]).merging(shyPages[site] ?? [:]) { _, shy in shy }
+        let kept = shy ? (pages[site] ?? [:]).merging(shyPages[site] ?? [:]) { _, shy in shy } : pages[site] ?? [:]
+        if let page, let exact = kept[page], let hit = image(exact, dark: dark) { return hit }
         guard !kept.isEmpty else { return nil }
         guard let page else {
             for candidate in kept.values.sorted(by: { $0.seen > $1.seen }) {
@@ -268,7 +310,7 @@ final class Favicons {
         failed = []
         for tab in tabs {
             guard tab.address != nil else { continue }
-            tab.icon = cached(for: tab.address)
+            tab.icon = cached(for: tab.address, shy: tab.shy)
             fetch(for: tab)
         }
     }
@@ -304,7 +346,7 @@ final class Favicons {
         let page = Favicons.page(url)
         let dark = Favicons.dark
         // Fresh and right for this look: nothing to do.
-        if !changed, let kept = shyPages[site]?[page] ?? pages[site]?[page], kept.seen > 0,
+        if !changed, let kept = (tab.shy ? shyPages[site]?[page] : nil) ?? pages[site]?[page], kept.seen > 0,
            let ident = dark ? kept.dark : kept.light, Favicons.fresh(ident), let known = known(ident) {
             tab.icon = known
             return
@@ -344,18 +386,20 @@ final class Favicons {
             config.timeoutIntervalForRequest = 8
             return config
         }())
-        var unreachable = false
+        var unanswered: [URL] = []
+        var asked = false
         for candidate in candidates where !failed.contains(candidate) {
+            if let until = unreachable[candidate], until > Date() { continue }
             let ident = Favicons.ident(candidate)
             // Another page of the site wears the same file, and it is fresh.
             if !shy, Favicons.fresh(ident), let image = known(ident) {
                 wear(ident, image, site: site, page: page, dark: dark, shy: shy)
                 return
             }
-            // No answer at all is the network, not the site: asked again the
-            // next time the page loads.
+            asked = true
+            // No answer at all is the network, not the site.
             guard let (data, response) = try? await session.data(from: candidate) else {
-                unreachable = true
+                unanswered.append(candidate)
                 continue
             }
             guard (response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? true,
@@ -373,14 +417,19 @@ final class Favicons {
         }
         // Unreachable once more, a moment later: the first requests an app
         // makes to a machine on the local network fail while macOS is still
-        // deciding whether it may.
-        if unreachable {
+        // deciding whether it may. Still nothing, and the address is left
+        // alone for a while rather than asked by every page of the site.
+        if !unanswered.isEmpty {
             if again {
                 try? await Task.sleep(for: .seconds(3))
                 await download(candidates, site: site, page: page, dark: dark, shy: shy, again: false)
+            } else {
+                for candidate in unanswered { unreachable[candidate] = Date() + Favicons.backoff }
             }
             return
         }
+        // Every candidate skipped: nothing new is known about the site.
+        guard asked else { return }
         // Not asked again this session: hammering a site for an icon it
         // doesn't have is exactly the kind of thing a quiet browser doesn't do.
         missing.insert(busyKey)
@@ -504,7 +553,7 @@ final class Favicons {
             if scheme != .any { score += 40 }
             scored.append((url, score))
         }
-        var list = scored.sorted { $0.1 > $1.1 }.map(\.0)
+        var list = Array(scored.sorted { $0.1 > $1.1 }.map(\.0).prefix(Favicons.tried))
         // The same site's root, its port included.
         if page.host() != nil, let root = URL(string: "/favicon.ico", relativeTo: page)?.absoluteURL {
             list.append(root)

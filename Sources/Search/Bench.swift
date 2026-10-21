@@ -1425,6 +1425,20 @@ final class Bench {
             }
             settled()
 
+        case "history":
+            // History on a --test run: "take" puts an address in as an import
+            // would, since a bench tab's visits never enter it; "forget" drops
+            // one as the panel's cross does. Answers with every address kept.
+            guard Store.testing else { answer(["error": "history only works on a --test run"]); return }
+            if let text = request["take"] as? String, let url = Address.url(from: text) {
+                browser.history.take(url, title: text, count: 1, last: Date())
+                browser.history.settle()
+            }
+            if let text = request["forget"] as? String, let url = Address.url(from: text) {
+                browser.history.forget(History.identity(for: url))
+            }
+            answer(["history": browser.history.everything().map(\.url.absoluteString)])
+
         case "import-file-start":
             guard Store.testing else { answer(["error": "import-file only works on a --test run"]); return }
             guard let path = request["path"] as? String else { answer(["error": "import-file needs a path"]); return }
